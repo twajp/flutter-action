@@ -1,0 +1,134 @@
+name: Build All
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        description: Choose Bump Target
+        options:
+          - build
+          - patch
+          - minor
+          - major
+      target:
+        type: choice
+        description: Choose Build Target
+        options:
+          - all
+          - ios
+          - appbundle
+      tag_and_release_note:
+        type: boolean
+        default: true
+        description: Create a Tag and Release Note
+
+jobs:
+  build_all:
+    runs-on: ubuntu-latest
+    outputs:
+      COMMIT_ID: ${{ steps.commit_id.outputs.COMMIT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Run flutter doctor
+        run: flutter doctor -v
+
+      - name: Run flutter pub get
+        run: flutter pub get
+
+      - name: Set up cider
+        run: flutter pub global activate cider
+
+      - name: Init git config
+        run: |
+          git config --local user.name 'github-actions[bot]'
+          git config --local user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Bump up version
+        run: |
+          echo choice: ${{ github.event.inputs.bump }}
+          cider bump ${{ github.event.inputs.bump }} --bump-build
+          echo "VERSION_NAME=$(cider version | grep -o -E "([0-9]+\.){1}[0-9]+(\.[0-9]+)?")" >> $GITHUB_ENV
+          echo "VERSION_FULL=$(cider version)" >> $GITHUB_ENV
+
+      - name: Commit and push pubspec.yaml
+        run: |
+          git add -u pubspec.yaml
+          echo "バージョン番号を$VERSION_FULLに変更" | git commit --file=-
+          git push
+
+      - name: Check previous release version name
+        if: github.event.inputs.tag_and_release_note == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 1 | grep -o -E "([0-9]+\.){1}[0-9]+(\.[0-9]+)?" | head -n1
+          echo "PREV_VERSION_NAME=$(gh release list --limit 1 | grep -o -E "([0-9]+\.){1}[0-9]+(\.[0-9]+)?" | head -n1)" >> $GITHUB_ENV
+
+      - name: Delete previous release if version number is same
+        if: |
+          github.event.inputs.tag_and_release_note == 'true' &&
+          env.VERSION_NAME == env.PREV_VERSION_NAME
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v$PREV_VERSION_NAME
+          git push origin --delete v$PREV_VERSION_NAME
+          git tag -d v$PREV_VERSION_NAME
+
+      - name: Create tag and release note
+        if: github.event.inputs.tag_and_release_note == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v$VERSION_NAME --generate-notes
+
+      - name: Check commit ID
+        id: commit_id
+        run: |
+          git show --format='%H' --no-patch
+          echo "COMMIT_ID=$(git show --format='%H' --no-patch)" >> $GITHUB_OUTPUT
+
+  build_ios:
+    needs: [ build_all ]
+    if: |
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'ios'
+    uses: ./.github/workflows/build_ios.yml
+    with:
+      COMMIT_ID: ${{ needs.build_all.outputs.COMMIT_ID }}
+    secrets:
+      APPLE_API_AUTHKEY_P8_BASE64: ${{ secrets.APPLE_API_AUTHKEY_P8_BASE64 }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  build_appbundle:
+    needs: [ build_all ]
+    if: |
+      github.event.inputs.target == 'all' ||
+      github.event.inputs.target == 'appbundle'
+    uses: ./.github/workflows/build_appbundle.yml
+    with:
+      COMMIT_ID: ${{ needs.build_all.outputs.COMMIT_ID }}
+    secrets:
+      ANDROID_ACCOUNT_KEY_JSON: ${{ secrets.ANDROID_ACCOUNT_KEY_JSON }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_JKS_BASE64: ${{ secrets.ANDROID_KEY_JKS_BASE64 }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+
+  build_web:
+    needs: [ build_all ]
+    uses: ./.github/workflows/build_web.yml
+    with:
+      COMMIT_ID: ${{ needs.build_all.outputs.COMMIT_ID }}
